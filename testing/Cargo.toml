@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 peppi = "2.1.1"
+rayon = "1.10.0"
 walkdir = "2.5.0"
 
 [lints]

@@ -1,14 +1,16 @@
 use peppi::game::Player;
 use peppi::game::immutable::Game;
 use peppi::io::slippi::read;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
 use std::io::BufReader;
+use std::sync::Mutex;
 use walkdir::WalkDir;
 
-pub const SLIPPI_PATH: &str = "slp/favs/";
+pub const SLIPPI_PATH: &str = "slp/";
 
 pub enum Sort {
     AlphabeticalAsc,
@@ -227,21 +229,27 @@ fn load_game(path: &str) -> Result<Game, Box<dyn Error>> {
 }
 
 pub fn scan_dir(path: &str) -> Vec<Game> {
-    let mut found_games = Vec::new();
-
-    for entry in WalkDir::new(&path) {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "slp") {
-                match load_game(path.to_str().unwrap()) {
-                    Ok(game) => found_games.push(game),
-                    Err(e) => eprintln!("Failed to load game from {:?}: {}", path, e),
+    WalkDir::new(path)
+        .into_iter()
+        .par_bridge() 
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map_or(false, |ext| ext == "slp")
+        })
+        .filter_map(|entry| {
+            let path_str = entry.path().to_str()?;
+            match load_game(path_str) {
+                Ok(game) => Some(game),
+                Err(e) => {
+                    eprintln!("Failed to load game from {:?}: {}", entry.path(), e);
+                    None
                 }
             }
-        }
-    }
-
-    return found_games;
+        })
+        .collect()
 }
 
 fn get_player_from_port<'a>(game: &'a Game, port: usize) -> Option<&'a Player> {
@@ -266,37 +274,27 @@ fn get_winner(game: &Game) -> Option<&Player> {
     return winner_port.and_then(|port| get_player_from_port(game, port as usize));
 }
 
-fn get_player_character(player: &Player) -> Character {
-    let player_character = Character::from_id(player.character);
-    return player_character;
-}
+fn get_total_wins(games: &Vec<Game>, id: &Id) -> i32 {
+    return games
+        .par_iter()
+        .filter_map(|game| {
+            let winner = get_winner(game)?;
+            let netplay = winner.netplay.as_ref()?;
 
-fn get_total_wins(games: &Vec<Game>, id: Id) -> i32 {
-    let mut total_wins = 0;
-
-    for game in games {
-        if let Some(winner) = get_winner(&game) {
-            if let Some(netplay) = &winner.netplay {
-                match &id {
-                    Id::Code(code) if &netplay.code.to_normalized() == code => {
-                        total_wins += 1;
-                    }
-                    Id::Nickname(name) if &netplay.name.to_normalized() == name => {
-                        total_wins += 1;
-                    }
-                    _ => {}
-                }
+            match &id {
+                Id::Code(code) if &netplay.code.to_normalized() == code => Some(1),
+                Id::Nickname(name) if &netplay.name.to_normalized() == name => Some(1),
+                _ => None,
             }
-        }
-    }
-    return total_wins;
+        })
+        .sum();
 }
 
 pub fn get_total_wins_per_character(games: &Vec<Game>, id: &Id, sort: Sort) -> String {
-    let mut wins_by_character: HashMap<Character, usize> = HashMap::new();
+    let wins_by_character = Mutex::new(HashMap::new());
 
-    for game in games {
-        if let Some(winner) = get_winner(&game) {
+    games.par_iter().for_each(|game| {
+        if let Some(winner) = get_winner(game) {
             if let Some(netplay) = &winner.netplay {
                 let matched = match id {
                     Id::Code(code) => &netplay.code.to_normalized() == code,
@@ -305,35 +303,31 @@ pub fn get_total_wins_per_character(games: &Vec<Game>, id: &Id, sort: Sort) -> S
 
                 if matched {
                     let character = Character::from_id(winner.character);
-                    *wins_by_character.entry(character).or_insert(0) += 1;
+                    let mut map = wins_by_character.lock().unwrap();
+                    *map.entry(character).or_insert(0) += 1;
                 }
             }
         }
-    }
+    });
 
-    let mut sorted: Vec<_> = wins_by_character.into_iter().collect();
+    let mut sorted: Vec<_> = wins_by_character
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .collect();
 
     match sort {
-        Sort::AlphabeticalAsc => {
-            sorted.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
-        }
-        Sort::AlphabeticalDesc => {
-            sorted.sort_by(|a, b| b.0.to_string().cmp(&a.0.to_string()));
-        }
-        Sort::CountAsc => {
-            sorted.sort_by(|a, b| a.1.cmp(&b.1));
-        }
-        Sort::CountDesc => {
-            sorted.sort_by(|a, b| b.1.cmp(&a.1));
-        }
+        Sort::AlphabeticalAsc => sorted.sort_by_key(|(c, _)| c.to_string()),
+        Sort::AlphabeticalDesc => sorted.sort_by_key(|(c, _)| std::cmp::Reverse(c.to_string())),
+        Sort::CountAsc => sorted.sort_by_key(|(_, count)| *count),
+        Sort::CountDesc => sorted.sort_by_key(|(_, count)| std::cmp::Reverse(*count)),
     }
 
-    let mut result = String::new();
-    for (character, count) in sorted {
-        result.push_str(&format!("{}: {}\n", character, count));
-    }
-
-    return result;
+    return sorted
+        .into_iter()
+        .map(|(character, count)| format!("{}: {}", character, count))
+        .collect::<Vec<_>>()
+        .join("\n");
 }
 
 fn main() {
@@ -355,7 +349,7 @@ fn main() {
         }
 
         // Get Player Character
-        let winner_character = get_player_character(winner);
+        let winner_character = Character::from_id(winner.character);
         println!("Winner character: {}", winner_character)
 
     } else {
@@ -365,7 +359,7 @@ fn main() {
     // Bulk Analysis
     let identity: Id = Id::Code(String::from("JAY#909"));
     let games: Vec<Game> = scan_dir(SLIPPI_PATH);
-    let total_wins: i32 = get_total_wins(&games, Id::Nickname(String::from("TtllyUrGrandpa")));
+    let total_wins: i32 = get_total_wins(&games, &identity);
     println!("Total wins = {}", total_wins);
     let total_wins_sorted = get_total_wins_per_character(&games, &identity, Sort::AlphabeticalAsc);
     print!("Total wins (Sorted per character) = \n{}", total_wins_sorted);

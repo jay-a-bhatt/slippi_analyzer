@@ -13,4 +13,4 @@ target_wasm
 .lycheecache
 
 # Slippi saves
-.slp
+*.slp
