@@ -1,33 +1,52 @@
-use peppi::game::immutable::Game;
+use crate::*;
 
 enum Page {
-    Home(HomePage),
-    All_Wins(AllWinsPage),
+    Home,
+    AllWins,
 }
 
-pub struct HomePage {}
-
-pub struct AllWinsPage {
-    games: Vec<Game>,
+#[derive(PartialEq)]
+pub enum IdType {
+    Code,
+    Nickname,
 }
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct TemplateApp {
-    // Example stuff:
-    label: String,
+    #[serde(skip)]
+    page: Page,
 
-    #[serde(skip)] // This how you opt-out of serialization of a field
-    value: f32,
+    #[serde(skip)]
+    id_type: IdType,
+
+    #[serde(skip)]
+    identity_input: String,
+
+    #[serde(skip)]
+    games: Vec<Game>,
+
+    #[serde(skip)]
+    slippi_path: Option<String>,
+
+    #[serde(skip)]
+    show_win_popup: bool,
+
+    #[serde(skip)]
+    total_wins: Option<i32>,
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
         Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
+            page: Page::Home,
+            id_type: IdType::Nickname,
+            identity_input: String::new(),
+            games: Vec::new(),
+            slippi_path: None,
+            show_win_popup: false,
+            total_wins: None,
         }
     }
 }
@@ -79,20 +98,90 @@ impl eframe::App for TemplateApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
-            ui.heading("eframe template");
+            match self.page {
+                Page::Home => {
+                    ui.heading("Main Menu");
 
-            ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(&mut self.label);
-            });
+                    if ui.button("Get Total Wins").clicked() {
+                        self.page = Page::AllWins;
+                    }
 
-            ui.add(egui::Slider::new(&mut self.value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                self.value += 1.0;
+                    ui.add_space(10.0);
+
+                    // Load via button
+                    if ui.button("Load Games").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.slippi_path = Some(path.display().to_string());
+                            self.games = scan_dir(&self.slippi_path.as_ref().unwrap());
+                        }
+                    }
+
+                    // Load via drag-and-drop
+                    if let Some(path) = ctx.input(|i| {
+                        i.raw.dropped_files.iter().find_map(|f| f.path.clone())
+                    }) {
+                        self.slippi_path = Some(path.to_string_lossy().to_string());
+                        self.games = scan_dir(&self.slippi_path.as_ref().unwrap());
+                    }
+
+                    if !self.games.is_empty() {
+                        if let Some(path) = &self.slippi_path {
+                            ui.label(format!("Loaded folder: {}", path));
+                        }
+                    }
+                }
+                Page::AllWins => {
+                    ui.heading("Get Total Wins");
+
+                    ui.horizontal(|ui| {
+                        ui.label("ID Type:");
+                        ui.radio_value(&mut self.id_type, IdType::Nickname, "Nickname");
+                        ui.radio_value(&mut self.id_type, IdType::Code, "Code");
+                    });
+
+                    ui.add_space(10.0);
+                    ui.label("Enter identity:");
+                    ui.text_edit_singleline(&mut self.identity_input);
+
+                    ui.add_space(10.0);
+                    if ui.button("Submit").clicked() {
+                        // You can call your get_total_wins function here
+                        // let wins = get_total_wins(self.games.clone(), self.id_type, self.identity_input.clone());
+                        // println!("Total wins: {}", wins);
+                        let id = match self.id_type {
+                            IdType::Nickname => Id::Nickname(self.identity_input.clone()),
+                            IdType::Code => Id::Code(self.identity_input.clone()),
+                        };
+
+                        let wins: i32 = get_total_wins(&self.games, &id);
+                        self.total_wins = Some(wins);
+                        self.show_win_popup = true;
+                    }
+
+                    if self.show_win_popup {
+                        egui::Window::new("Total Wins")
+                            .collapsible(false)
+                            .resizable(false)
+                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                            .show(ctx, |ui| {
+                                if let Some(wins) = self.total_wins {
+                                    ui.label(format!("Total Wins: {}", wins));
+                                } else {
+                                    ui.label("No data available.");
+                                }
+
+                                if ui.button("Close").clicked() {
+                                    self.show_win_popup = false;
+                                }
+                            });
+                    }
+
+                    ui.add_space(20.0);
+                    if ui.button("Back").clicked() {
+                        self.page = Page::Home;
+                    }
+                }
             }
-
-            ui.separator();
         });
     }
 }
